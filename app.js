@@ -520,6 +520,9 @@ function viewAjustes() {
   const cm = thisMonth();
   return `<section class="section" style="margin-top:8px">
     <div class="section-head"><h2>Cartões de crédito</h2><button class="link" data-action="new-card">Adicionar</button></div>
+    ${state.cards.length ? `<button class="panel row" style="margin-bottom:10px" data-action="import-csv">
+      <span class="row-main"><b>Importar fatura do Nubank</b><small>Arquivo .csv; as parcelas entram no lugar certo</small></span><span class="chev">›</span>
+    </button>` : ''}
     <div class="panel rows">${state.cards.map(c => `<button class="row" data-action="edit-card" data-id="${esc(c.id)}">
       ${ic(c.name, c.color)}
       <span class="row-main"><b>${esc(c.name)}</b><small>Fecha dia ${c.closingDay} · vence dia ${c.dueDay}</small></span>
@@ -796,7 +799,7 @@ const FORMS = {
       cardId: card?.id || null,
       categoryId,
       installments,
-      firstInvoice: card && installments > 1 && form.dataset.override ? form.dataset.override : null,
+      firstInvoice: card && form.dataset.override ? form.dataset.override : null,
     };
     upsert(state.expenses, form.dataset.id, data);
     closeSheet();
@@ -951,6 +954,140 @@ async function importJson(file) {
   }
 }
 
+/* ---------- importação de fatura (CSV do Nubank) ---------- */
+
+// Categoria sugerida pelo nome do lançamento; a primeira regra que bater vence.
+const AUTO_CATEGORIES = [
+  ['ifood', /ifood/i],
+  ['carro', /posto|combust|shell|ipiranga|petrobras|lubrificante|auto ?pe[cç]a|estacionamento|sem parar|veloe|conectcar|detran|oficina|pneu/i],
+  ['mercado', /supermercado|atacad|assa[ií]|carrefour|p[aã]o de a[cç][uú]car|hortifruti|\bmercado\b/i],
+  ['casa', /brisanet|internet|enel|energia|cagece|[aá]gua|aluguel|condom/i],
+  ['saude', /farm[aá]cia|drogaria|drogasil|pague menos|wellhub|gympass|smart ?fit|academia|hospital|cl[ií]nica|laborat/i],
+  ['assinaturas', /spotify|netflix|amazonprime|prime video|apple\.com|anthropic|claude|youtube|disney|hbo|globoplay|deezer|icloud/i],
+  ['lazer', /steam|cinema|ingresso|playstation|xbox|nintendo|teddyland|burg|pizza|sorvete|restaurante/i],
+];
+// "Loja - Parcela 3/7" ou "Pix no Crédito - Fulano - 2/12"
+const INSTALLMENT_RE = /\s*-\s*(?:Parcela\s+)?(\d{1,2})\/(\d{1,2})\s*$/i;
+
+function guessCategory(title) {
+  const has = id => state.categories.some(c => c.id === id && (c.kind || 'expense') === 'expense');
+  for (const [id, re] of AUTO_CATEGORIES) if (re.test(title) && has(id)) return id;
+  return has('outros') ? 'outros' : catsOf('expense')[0]?.id;
+}
+
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cur += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+// O CSV traz o valor de cada parcela; o total da compra é parcela × quantidade.
+function parseNubankCsv(text) {
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/).filter(l => l.trim());
+  const header = parseCsvLine(lines.shift() || '').map(h => h.trim().toLowerCase());
+  const [di, ti, ai] = ['date', 'title', 'amount'].map(h => header.indexOf(h));
+  if (di < 0 || ti < 0 || ai < 0) throw new Error('formato');
+  const items = [];
+  const skipped = [];
+  for (const line of lines) {
+    const cols = parseCsvLine(line);
+    const date = (cols[di] || '').trim();
+    const title = (cols[ti] || '').trim();
+    const amount = parseMoney(cols[ai]);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(amount)) continue;
+    if (amount <= 0) { skipped.push({ title, amount }); continue; }
+    const m = title.match(INSTALLMENT_RE);
+    const valid = m && Number(m[1]) >= 1 && Number(m[1]) <= Number(m[2]);
+    const desc = (valid ? title.slice(0, m.index) : title).trim() || title;
+    items.push({ date, desc, amount, current: valid ? Number(m[1]) : 1, n: valid ? Number(m[2]) : 1, categoryId: guessCategory(desc) });
+  }
+  return { items, skipped };
+}
+
+let pendingImport = null;
+
+async function readInvoiceCsv(file) {
+  if (!state.cards.length) return toast('Cadastre o cartão antes de importar');
+  try {
+    pendingImport = parseNubankCsv(await file.text());
+  } catch {
+    return toast('Não reconheci esse arquivo de fatura');
+  }
+  if (!pendingImport.items.length) return toast('Nenhum lançamento encontrado no arquivo');
+  const card = state.cards.find(c => /nubank|\bnu\b/i.test(c.name)) || state.cards[0];
+  const fromName = file.name.match(/(\d{4})-(\d{2})-\d{2}/);
+  importSheet(card, fromName ? `${fromName[1]}-${fromName[2]}` : openInvoice(card));
+}
+
+function importSheet(card, key) {
+  const { items, skipped } = pendingImport;
+  const total = items.reduce((a, it) => a + it.amount, 0);
+  const parcelados = items.filter(it => it.n > 1).length;
+  const ignored = skipped.reduce((a, s) => a + Math.abs(s.amount), 0);
+  openSheet('Importar fatura', `<form class="form" data-form="import">
+    <fieldset class="field"><legend>Cartão</legend><div class="chips wrap">
+      ${state.cards.map(c => radioChip('cardId', c.id, c.name, c.color, c.id === card.id)).join('')}
+    </div></fieldset>
+    <label class="field"><span>Fatura (mês do vencimento)</span><input type="month" name="month" value="${key}" required></label>
+    <div class="split">
+      <div><span>Lançamentos</span><b>${items.length}</b></div>
+      <div><span>Parcelados</span><b>${parcelados}</b></div>
+      <div><span>Total</span><b>${money(total)}</b></div>
+    </div>
+    ${skipped.length ? `<p class="hint">${skipped.length === 1 ? '1 pagamento ou estorno ficou' : `${skipped.length} pagamentos ou estornos ficaram`} de fora (${money(ignored)}).</p>` : ''}
+    <div class="panel rows">${items.map(it => {
+      const cat = catById(it.categoryId);
+      const meta = [fmtDay(it.date), esc(cat.name), it.n > 1 ? `${it.current}/${it.n}` : ''].filter(Boolean).join(' · ');
+      return `<div class="row">${ic(cat.name, cat.color)}<span class="row-main"><b>${esc(it.desc)}</b><small>${meta}</small></span><span class="row-val">${money(it.amount)}</span></div>`;
+    }).join('')}</div>
+    <p class="hint">As categorias foram sugeridas pelo nome. Depois de importar, toque em qualquer lançamento para trocar.</p>
+    <div class="actions"><button class="btn primary">Importar ${items.length} lançamentos</button></div>
+  </form>`);
+}
+
+FORMS.import = fd => {
+  const card = cardById(fd.get('cardId'));
+  const key = fd.get('month');
+  if (!card || !/^\d{4}-\d{2}$/.test(key) || !pendingImport) return toast('Escolha o cartão e o mês da fatura');
+  const before = state.expenses.slice();
+  let added = 0;
+  let repeated = 0;
+  for (const it of pendingImport.items) {
+    const first = addMonths(key, -(it.current - 1));
+    const amount = it.amount * it.n;
+    // Importar a mesma fatura duas vezes não duplica os lançamentos.
+    if (before.some(e => e.cardId === card.id && e.desc === it.desc && e.amount === amount && firstInvoiceOf(e, card) === first)) {
+      repeated++;
+      continue;
+    }
+    state.expenses.push({
+      id: uid(), createdAt: Date.now(), type: 'expense', desc: it.desc, amount, date: it.date,
+      cardId: card.id, categoryId: it.categoryId, installments: it.n, firstInvoice: first, source: 'csv',
+    });
+    added++;
+  }
+  pendingImport = null;
+  closeSheet();
+  ui.tab = 'faturas';
+  ui.cardId = card.id;
+  ui.invMonth = key;
+  commit();
+  window.scrollTo(0, 0);
+  toast(`${added} importados${repeated ? ` · ${repeated} já existiam` : ''}`);
+};
+
 /* ---------- ações ---------- */
 
 const ACTIONS = {
@@ -1033,6 +1170,7 @@ const ACTIONS = {
   'export-json': exportJson,
   'export-csv': exportCsv,
   'import-json': () => $('#import-file').click(),
+  'import-csv': () => $('#import-csv').click(),
   wipe: () => {
     if (!confirm('Apagar TODOS os dados deste aparelho? Isso não pode ser desfeito.')) return;
     if (!confirm('Tem certeza? Recomendo exportar um backup antes.')) return;
@@ -1079,6 +1217,12 @@ $('#import-file').addEventListener('change', e => {
   const file = e.target.files[0];
   e.target.value = '';
   if (file) importJson(file);
+});
+
+$('#import-csv').addEventListener('change', e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) readInvoiceCsv(file);
 });
 
 document.addEventListener('keydown', e => {
