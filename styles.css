@@ -97,6 +97,10 @@ button.row:active { background: var(--surface-2); }
 .row-val { font-weight: 650; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .row-val small { display: block; color: var(--muted); font-weight: 450; font-size: 12px; }
 .row .chev { color: var(--faint); font-size: 18px; }
+.file-row { position: relative; cursor: pointer; }
+.file-row:active { background: var(--surface-2); }
+/* Invisível mas presente: display:none impede o iOS de abrir o seletor. */
+.file-input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
 
 .badge { font-size: 11px; padding: 3px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); font-weight: 650; white-space: nowrap; }
 .badge.open { background: rgba(155, 225, 93, .15); color: var(--accent); }

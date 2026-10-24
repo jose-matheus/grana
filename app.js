@@ -515,14 +515,20 @@ function viewInvest() {
   </section>`;
 }
 
+// O seletor de arquivos abre pelo toque direto no <label>: o Safari do iPhone
+// ignora input.click() disparado por código no app instalado. Sem "accept",
+// para o iOS não deixar o .csv ou o .json acinzentado na lista.
+const fileInput = kind => `<input type="file" class="file-input" data-file="${kind}">`;
+
 function viewAjustes() {
   const last = state.meta?.lastBackup;
   const cm = thisMonth();
   return `<section class="section" style="margin-top:8px">
     <div class="section-head"><h2>Cartões de crédito</h2><button class="link" data-action="new-card">Adicionar</button></div>
-    ${state.cards.length ? `<button class="panel row" style="margin-bottom:10px" data-action="import-csv">
+    ${state.cards.length ? `<label class="panel row file-row" style="margin-bottom:10px">
       <span class="row-main"><b>Importar fatura do Nubank</b><small>Arquivo .csv; as parcelas entram no lugar certo</small></span><span class="chev">›</span>
-    </button>` : ''}
+      ${fileInput('csv')}
+    </label>` : ''}
     <div class="panel rows">${state.cards.map(c => `<button class="row" data-action="edit-card" data-id="${esc(c.id)}">
       ${ic(c.name, c.color)}
       <span class="row-main"><b>${esc(c.name)}</b><small>Fecha dia ${c.closingDay} · vence dia ${c.dueDay}</small></span>
@@ -558,7 +564,7 @@ function viewAjustes() {
     <div class="panel rows">
       <button class="row" data-action="export-json"><span class="row-main"><b>Exportar backup</b><small>Arquivo .json com todos os dados · ${last ? `último em ${fmtFull(last.slice(0, 10))}` : 'nunca feito'}</small></span><span class="chev">›</span></button>
       <button class="row" data-action="export-csv"><span class="row-main"><b>Exportar planilha</b><small>Lançamentos e parcelas em .csv (abre no Excel)</small></span><span class="chev">›</span></button>
-      <button class="row" data-action="import-json"><span class="row-main"><b>Importar backup</b><small>Substitui os dados deste aparelho</small></span><span class="chev">›</span></button>
+      <label class="row file-row"><span class="row-main"><b>Importar backup</b><small>Substitui os dados deste aparelho</small></span><span class="chev">›</span>${fileInput('backup')}</label>
       <button class="row" data-action="wipe"><span class="row-main"><b class="neg">Apagar todos os dados</b></span></button>
     </div>
   </section>
@@ -1169,8 +1175,6 @@ const ACTIONS = {
 
   'export-json': exportJson,
   'export-csv': exportCsv,
-  'import-json': () => $('#import-file').click(),
-  'import-csv': () => $('#import-csv').click(),
   wipe: () => {
     if (!confirm('Apagar TODOS os dados deste aparelho? Isso não pode ser desfeito.')) return;
     if (!confirm('Tem certeza? Recomendo exportar um backup antes.')) return;
@@ -1213,16 +1217,13 @@ function shiftMonth(n) {
   }
 }));
 
-$('#import-file').addEventListener('change', e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (file) importJson(file);
-});
-
-$('#import-csv').addEventListener('change', e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (file) readInvoiceCsv(file);
+document.addEventListener('change', e => {
+  const input = e.target.closest?.('input[data-file]');
+  const file = input?.files[0];
+  if (!file) return;
+  input.value = '';
+  if (input.dataset.file === 'csv') readInvoiceCsv(file);
+  else importJson(file);
 });
 
 document.addEventListener('keydown', e => {
