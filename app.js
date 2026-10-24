@@ -78,7 +78,7 @@ function defaultState() {
       { id: 'casa', name: 'Casa', color: '#A78BFA' },
       { id: 'lazer', name: 'Lazer', color: '#34D399' },
       { id: 'saude', name: 'Saúde', color: '#F472B6' },
-      { id: 'assinaturas', name: 'Assinaturas', color: '#22D3EE' },
+      { id: 'assinaturas', name: 'Assinaturas', color: '#22D3EE', recurring: true },
       { id: 'outros', name: 'Outros', color: '#94A3B8' },
       { id: 'salario', name: 'Salário', color: '#9BE15D', kind: 'income' },
       { id: 'extra', name: 'Renda extra', color: '#34D399', kind: 'income' },
@@ -98,6 +98,8 @@ function migrate(s) {
   if (!s.categories.some(c => c.kind === 'income')) {
     s.categories.push(...defaultState().categories.filter(c => c.kind === 'income'));
   }
+  const subs = s.categories.find(c => c.id === 'assinaturas');
+  if (subs && subs.recurring === undefined) subs.recurring = true;
   return s;
 }
 
@@ -129,6 +131,9 @@ const cardById = id => state.cards.find(c => c.id === id);
 const catById = id => state.categories.find(c => c.id === id) || { id, name: 'Sem categoria', color: '#94A3B8' };
 const catsOf = kind => state.categories.filter(c => (c.kind || 'expense') === kind);
 const isIncome = x => x.type === 'income';
+// Compra à vista no cartão numa categoria recorrente (ex.: Assinaturas) se
+// repete em toda fatura até endMonth, a última fatura cobrada.
+const isRecurring = e => !isIncome(e) && !!e.cardId && (e.installments || 1) === 1 && !!catById(e.categoryId).recurring;
 
 /* ---------- regras de fatura ---------- */
 
@@ -177,9 +182,12 @@ function entriesFor(key, byDue = false) {
       const card = cardById(e.cardId);
       if (!card) continue;
       const n = e.installments || 1;
-      const i = monthDiff(firstInvoiceOf(e, card), byDue ? key : invoiceClosingIn(card, key));
-      if (i >= 0 && i < n) {
-        out.push({ ...base, kind: 'card', cardId: card.id, amount: splitInstallments(e.amount, n)[i], label: n > 1 ? `${i + 1}/${n}` : '' });
+      const inv = byDue ? key : invoiceClosingIn(card, key);
+      const i = monthDiff(firstInvoiceOf(e, card), inv);
+      if (isRecurring(e)) {
+        if (i >= 0 && (!e.endMonth || inv <= e.endMonth)) out.push({ ...base, kind: 'card', cardId: card.id, amount: e.amount, label: 'mensal', recurring: true });
+      } else if (i >= 0 && i < n) {
+        out.push({ ...base, kind: 'card', cardId: card.id, amount: splitInstallments(e.amount, n)[i], label: n > 1 ? `${i + 1}/${n}` : '', installment: n > 1 });
       }
     } else if (monthOf(e.date) === key) {
       out.push({ ...base, kind: 'other', amount: e.amount, label: '' });
@@ -202,6 +210,10 @@ function limitUsed(card) {
     if (e.cardId !== card.id || isIncome(e)) continue;
     const n = e.installments || 1;
     const first = firstInvoiceOf(e, card);
+    if (isRecurring(e)) {
+      if (!e.endMonth || e.endMonth >= open) used += e.amount;
+      continue;
+    }
     splitInstallments(e.amount, n).forEach((v, i) => {
       if (addMonths(first, i) >= open) used += v;
     });
@@ -338,7 +350,7 @@ function installmentPlan(base = thisMonth()) {
   items.sort((a, b) => a.end.localeCompare(b.end) || b.each - a.each);
   const lastEnd = items.reduce((m, it) => (it.end > m ? it.end : m), base);
   const months = Array.from({ length: monthDiff(base, lastEnd) + 2 }, (_, i) => addMonths(base, i));
-  const burden = months.map(k => sum(entriesFor(k).filter(e => e.kind === 'card' && e.label)));
+  const burden = months.map(k => sum(entriesFor(k).filter(e => e.installment)));
   return { items, months, burden, now: burden[0], free: months[months.length - 1], remaining: items.reduce((a, it) => a + it.remaining, 0) };
 }
 
@@ -734,7 +746,7 @@ function viewAjustes() {
     <div class="section-head"><h2>Categorias</h2><button class="link" data-action="new-category">Adicionar</button></div>
     <div class="panel rows">${state.categories.map(c => `<button class="row" data-action="edit-category" data-id="${esc(c.id)}">
       <i class="dot" style="--c:${color(c.color)};width:12px;height:12px"></i>
-      <span class="row-main"><b>${esc(c.name)}</b>${c.limit ? `<small>Limite de ${money(c.limit)} por mês</small>` : ''}</span>
+      <span class="row-main"><b>${esc(c.name)}</b>${c.limit || c.recurring ? `<small>${[c.recurring ? 'Repete todo mês' : '', c.limit ? `Limite de ${money(c.limit)}` : ''].filter(Boolean).join(' · ')}</small>` : ''}</span>
       <span class="row-val">${c.kind === 'income' ? '<span class="badge">Receita</span>' : c.pinned ? '<span class="badge open">Destaque</span>' : ''}</span>
     </button>`).join('')}</div>
   </section>
@@ -818,9 +830,13 @@ function expenseForm(id) {
     </div>
     <label class="field" data-current><span>Parcela na fatura aberta</span><select name="current"></select></label>
     <p class="hint" data-hint></p>
+    ${e && isRecurring(e) ? (e.endMonth
+      ? `<button type="button" class="btn ghost block" data-action="resume-sub" data-id="${esc(e.id)}">Reativar assinatura</button>`
+      : `<button type="button" class="btn ghost block" data-action="end-sub" data-id="${esc(e.id)}">Encerrar assinatura</button>`) : ''}
     <div class="actions">${e ? deleteButton('delete-expense', e.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
   const form = $('form[data-form="expense"]');
+  form.dataset.end = e?.endMonth || '';
   updateExpenseForm(form);
   if (!e) form.amount.focus();
 }
@@ -829,9 +845,10 @@ function updateExpenseForm(form, changed) {
   const fd = new FormData(form);
   const type = toggleType(form);
   const card = type === 'expense' ? cardById(fd.get('cardId')) : null;
-  const n = card ? Number(fd.get('installments')) || 1 : 1;
+  const recurring = !!card && !!catById(fd.get('categoryId')).recurring;
+  const n = card && !recurring ? Number(fd.get('installments')) || 1 : 1;
   const date = fd.get('date');
-  form.querySelector('[data-installments]').style.visibility = card ? 'visible' : 'hidden';
+  form.querySelector('[data-installments]').style.visibility = card && !recurring ? 'visible' : 'hidden';
   if (changed === 'date' || changed === 'cardId') form.dataset.override = '';
 
   const currentField = form.querySelector('[data-current]');
@@ -846,6 +863,13 @@ function updateExpenseForm(form, changed) {
   const open = openInvoice(card);
   if (changed === 'current') form.dataset.override = addMonths(open, -(Number(current.value) - 1));
   const first = form.dataset.override || invoiceMonthFor(card, date);
+  if (recurring) {
+    const end = form.dataset.end;
+    hint.innerHTML = end
+      ? `Assinatura encerrada: a última cobrança foi na fatura de <b>${monthShort(end)}</b>.`
+      : `Assinatura: entra na fatura de <b>${monthShort(first)}</b> do ${esc(card.name)} e se repete todo mês até você encerrar.`;
+    return;
+  }
   const last = addMonths(first, n - 1);
   const i = monthDiff(first, open);
 
@@ -911,6 +935,7 @@ function categoryForm(id) {
     <fieldset class="field"><legend>Cor</legend>${swatches(c?.color || PALETA[state.categories.length % PALETA.length])}</fieldset>
     <label class="field" data-only="expense"><span>Limite por mês (opcional)</span><input name="limit" inputmode="decimal" placeholder="Sem limite" value="${c?.limit ? centsToInput(c.limit) : ''}"></label>
     <label class="check" data-only="expense"><input type="checkbox" name="pinned" ${c?.pinned ? 'checked' : ''}> Destacar no resumo</label>
+    <label class="check" data-only="expense"><input type="checkbox" name="recurring" ${c?.recurring ? 'checked' : ''}> Repete todo mês no cartão (assinaturas)</label>
     <div class="actions">${c && c.id !== 'outros' ? deleteButton('delete-category', c.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
   toggleType($('form[data-form="category"]'));
@@ -976,8 +1001,9 @@ const FORMS = {
     if (!(amount > 0)) return toast('Informe um valor válido');
     const type = fd.get('type');
     const card = type === 'expense' ? cardById(fd.get('cardId')) : null;
-    const installments = card ? Number(fd.get('installments')) || 1 : 1;
     const categoryId = pickedCategory(fd);
+    const recurring = !!card && !!catById(categoryId).recurring;
+    const installments = card && !recurring ? Number(fd.get('installments')) || 1 : 1;
     const data = {
       type,
       desc: fd.get('desc').trim() || catById(categoryId).name,
@@ -1000,9 +1026,11 @@ const FORMS = {
         ui.invMonth = inOpen ? open : first;
       }
       commit();
-      toast(inOpen && installments > 1
-        ? `Parcela ${i + 1}/${installments} na fatura de ${monthShort(open)}`
-        : `Lançado na fatura de ${monthShort(first)}`);
+      toast(recurring
+        ? `Assinatura: todo mês a partir de ${monthShort(first)}`
+        : inOpen && installments > 1
+          ? `Parcela ${i + 1}/${installments} na fatura de ${monthShort(open)}`
+          : `Lançado na fatura de ${monthShort(first)}`);
     } else {
       commit();
       toast(type === 'income' ? 'Receita lançada' : form.dataset.id ? 'Gasto atualizado' : 'Gasto lançado');
@@ -1047,6 +1075,7 @@ const FORMS = {
       color: fd.get('color') || PALETA[0],
       pinned: kind === 'expense' && fd.get('pinned') === 'on',
       limit: kind === 'expense' && limit > 0 ? limit : null,
+      recurring: kind === 'expense' && fd.get('recurring') === 'on',
       kind,
     });
     closeSheet();
@@ -1275,6 +1304,16 @@ FORMS.import = fd => {
       repeated++;
       continue;
     }
+    // Uma assinatura que o app já repete nesta fatura não entra de novo. Se o
+    // valor mudou (ex.: cobrança em dólar), a antiga termina no mês anterior e
+    // a nova segue com o valor atual.
+    const sub = it.n === 1 && before.find(e => e.cardId === card.id && e.desc === it.desc && isRecurring(e)
+      && firstInvoiceOf(e, card) <= key && (!e.endMonth || e.endMonth >= key));
+    if (sub && sub.amount === amount) {
+      repeated++;
+      continue;
+    }
+    if (sub) sub.endMonth = addMonths(key, -1);
     state.expenses.push({
       id: uid(), createdAt: Date.now(), type: 'expense', desc: it.desc, amount, date: it.date,
       cardId: card.id, categoryId: it.categoryId, installments: it.n, firstInvoice: first, source: 'csv',
@@ -1308,6 +1347,26 @@ const ACTIONS = {
   'go-open-invoice': () => { ui.invMonth = openInvoice(cardById(ui.cardId)); render(); },
   'open-invoice': d => { ui.cardId = d.id; ui.invMonth = d.month; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
 
+  // A última cobrança é a fatura aberta (ou a primeira, se ainda não começou).
+  'end-sub': d => {
+    const e = state.expenses.find(x => x.id === d.id);
+    const card = e && cardById(e.cardId);
+    if (!card) return;
+    const first = firstInvoiceOf(e, card);
+    const open = openInvoice(card);
+    e.endMonth = first > open ? first : open;
+    closeSheet();
+    commit();
+    toast(`Encerrada; última cobrança em ${monthShort(e.endMonth)}`);
+  },
+  'resume-sub': d => {
+    const e = state.expenses.find(x => x.id === d.id);
+    if (!e) return;
+    delete e.endMonth;
+    closeSheet();
+    commit();
+    toast('Assinatura reativada');
+  },
   'edit-goal': () => goalForm(),
   'remove-goal': () => { state.goal = { monthly: null }; closeSheet(); commit(); },
   'goal-aporte': () => {
