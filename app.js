@@ -1185,11 +1185,11 @@ async function importJson(file) {
 // Categoria sugerida pelo nome do lançamento; a primeira regra que bater vence.
 const AUTO_CATEGORIES = [
   ['ifood', /ifood/i],
+  ['assinaturas', /spotify|netflix|amazonprime|prime video|apple\.com|anthropic|claude|youtube|disney|hbo|globoplay|deezer|icloud|wellhub|gympass|brisanet|internet/i],
   ['carro', /posto|combust|shell|ipiranga|petrobras|lubrificante|auto ?pe[cç]a|estacionamento|sem parar|veloe|conectcar|detran|oficina|pneu/i],
   ['mercado', /supermercado|atacad|assa[ií]|carrefour|p[aã]o de a[cç][uú]car|hortifruti|\bmercado\b/i],
-  ['casa', /brisanet|internet|enel|energia|cagece|[aá]gua|aluguel|condom/i],
-  ['saude', /farm[aá]cia|drogaria|drogasil|pague menos|wellhub|gympass|smart ?fit|academia|hospital|cl[ií]nica|laborat/i],
-  ['assinaturas', /spotify|netflix|amazonprime|prime video|apple\.com|anthropic|claude|youtube|disney|hbo|globoplay|deezer|icloud/i],
+  ['casa', /enel|energia|cagece|[aá]gua|aluguel|condom/i],
+  ['saude', /farm[aá]cia|drogaria|drogasil|pague menos|smart ?fit|academia|hospital|cl[ií]nica|laborat/i],
   ['lazer', /steam|cinema|ingresso|playstation|xbox|nintendo|teddyland|burg|pizza|sorvete|restaurante/i],
 ];
 // "Loja - Parcela 3/7" ou "Pix no Crédito - Fulano - 2/12"
