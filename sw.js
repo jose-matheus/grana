@@ -1,5 +1,5 @@
 // Troque a versão a cada publicação para o iPhone baixar os arquivos novos.
-const CACHE = 'grana-v1';
+const CACHE = 'grana-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -13,7 +13,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+  // cache: 'reload' evita copiar arquivos antigos do cache HTTP do navegador.
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS.map(url => new Request(url, { cache: 'reload' })))));
   self.skipWaiting();
 });
 

@@ -80,6 +80,8 @@ function defaultState() {
       { id: 'saude', name: 'Saúde', color: '#F472B6' },
       { id: 'assinaturas', name: 'Assinaturas', color: '#22D3EE' },
       { id: 'outros', name: 'Outros', color: '#94A3B8' },
+      { id: 'salario', name: 'Salário', color: '#9BE15D', kind: 'income' },
+      { id: 'extra', name: 'Renda extra', color: '#34D399', kind: 'income' },
     ],
     expenses: [],
     fixed: [],
@@ -89,16 +91,26 @@ function defaultState() {
   };
 }
 
+// Completa dados salvos por versões anteriores do app.
+function migrate(s) {
+  s = { ...defaultState(), ...s };
+  if (!s.categories.some(c => c.kind === 'income')) {
+    s.categories.push(...defaultState().categories.filter(c => c.kind === 'income'));
+  }
+  return s;
+}
+
 function load() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...defaultState(), ...JSON.parse(raw) };
+    if (raw) return migrate(JSON.parse(raw));
   } catch { /* começa do zero */ }
   return defaultState();
 }
 
 let state = load();
-const ui = { tab: 'resumo', month: thisMonth(), cardId: null };
+// invMonth é o mês da aba Faturas, que abre na fatura aberta do cartão.
+const ui = { tab: 'resumo', month: thisMonth(), invMonth: thisMonth(), cardId: null };
 
 function save() {
   try {
@@ -114,6 +126,8 @@ function commit() {
 
 const cardById = id => state.cards.find(c => c.id === id);
 const catById = id => state.categories.find(c => c.id === id) || { id, name: 'Sem categoria', color: '#94A3B8' };
+const catsOf = kind => state.categories.filter(c => (c.kind || 'expense') === kind);
+const isIncome = x => x.type === 'income';
 
 /* ---------- regras de fatura ---------- */
 
@@ -128,8 +142,13 @@ function invoiceDates(card, key) {
   const close = card.dueDay > card.closingDay ? key : addMonths(key, -1);
   return { close: dateIn(close, card.closingDay), due: dateIn(key, card.dueDay) };
 }
+const openInvoice = card => invoiceMonthFor(card, todayISO());
+// A parcela 1 cai na fatura da data da compra, a não ser que o usuário
+// tenha informado em qual parcela a compra está (firstInvoice).
+const firstInvoiceOf = (e, card) => e.firstInvoice || invoiceMonthFor(card, e.date);
+
 function invoiceStatus(card, key) {
-  const open = invoiceMonthFor(card, todayISO());
+  const open = openInvoice(card);
   if (key === open) return { label: 'Aberta', cls: 'open' };
   return key < open ? { label: 'Fechada', cls: '' } : { label: 'Futura', cls: '' };
 }
@@ -141,16 +160,18 @@ function splitInstallments(total, n) {
 }
 
 // Tudo o que pesa no mês: parcelas de cartão pela fatura, Pix/débito pela
-// data e os gastos fixos (financiamentos, assinaturas).
+// data, os gastos fixos (financiamentos, assinaturas) e as receitas.
 function entriesFor(key) {
   const out = [];
   for (const e of state.expenses) {
     const base = { categoryId: e.categoryId, desc: e.desc, date: e.date, ref: e.id };
-    if (e.cardId) {
+    if (isIncome(e)) {
+      if (monthOf(e.date) === key) out.push({ ...base, kind: 'income', amount: e.amount, label: '' });
+    } else if (e.cardId) {
       const card = cardById(e.cardId);
       if (!card) continue;
       const n = e.installments || 1;
-      const i = monthDiff(invoiceMonthFor(card, e.date), key);
+      const i = monthDiff(firstInvoiceOf(e, card), key);
       if (i >= 0 && i < n) {
         out.push({ ...base, kind: 'card', cardId: card.id, amount: splitInstallments(e.amount, n)[i], label: n > 1 ? `${i + 1}/${n}` : '' });
       }
@@ -161,7 +182,7 @@ function entriesFor(key) {
   for (const f of state.fixed) {
     const i = monthDiff(f.startMonth, key);
     if (i >= 0 && (!f.total || i < f.total)) {
-      out.push({ kind: 'fixed', categoryId: f.categoryId, desc: f.name, date: dateIn(key, f.dueDay || 1), amount: f.amount, label: f.total ? `${i + 1}/${f.total}` : '', ref: f.id });
+      out.push({ kind: isIncome(f) ? 'income' : 'fixed', fixed: true, categoryId: f.categoryId, desc: f.name, date: dateIn(key, f.dueDay || 1), amount: f.amount, label: f.total ? `${i + 1}/${f.total}` : '', ref: f.id });
     }
   }
   return out;
@@ -169,12 +190,12 @@ function entriesFor(key) {
 
 // Limite comprometido: parcelas da fatura aberta em diante.
 function limitUsed(card) {
-  const open = invoiceMonthFor(card, todayISO());
+  const open = openInvoice(card);
   let used = 0;
   for (const e of state.expenses) {
-    if (e.cardId !== card.id) continue;
+    if (e.cardId !== card.id || isIncome(e)) continue;
     const n = e.installments || 1;
-    const first = invoiceMonthFor(card, e.date);
+    const first = firstInvoiceOf(e, card);
     splitInstallments(e.amount, n).forEach((v, i) => {
       if (addMonths(first, i) >= open) used += v;
     });
@@ -236,12 +257,13 @@ function stackBar(groups, total) {
 
 function entryRow(e) {
   const cat = catById(e.categoryId);
-  const action = e.kind === 'fixed' ? 'edit-fixed' : 'edit-expense';
+  const action = e.fixed ? 'edit-fixed' : 'edit-expense';
   const meta = [fmtDay(e.date), esc(cat.name), e.label].filter(Boolean).join(' · ');
+  const val = e.kind === 'income' ? `<span class="pos">+ ${money(e.amount)}</span>` : money(e.amount);
   return `<button class="row" data-action="${action}" data-id="${esc(e.ref)}">
     ${ic(cat.name, cat.color)}
     <span class="row-main"><b>${esc(e.desc)}</b><small>${meta}</small></span>
-    <span class="row-val">${money(e.amount)}</span>
+    <span class="row-val">${val}</span>
   </button>`;
 }
 
@@ -252,6 +274,33 @@ function empty(title, text, action, label) {
 function radioChip(name, value, label, c, checked) {
   return `<label class="chip" style="--c:${color(c)}"><input type="radio" name="${name}" value="${esc(value)}" ${checked ? 'checked' : ''}>${esc(label)}</label>`;
 }
+function typeToggle(type, labels = ['Gasto', 'Receita']) {
+  return `<div class="seg">
+    <label><input type="radio" name="type" value="expense" ${type !== 'income' ? 'checked' : ''}>${labels[0]}</label>
+    <label><input type="radio" name="type" value="income" ${type === 'income' ? 'checked' : ''}>${labels[1]}</label>
+  </div>`;
+}
+// Categorias de gasto e de receita ficam em grupos separados; só o do tipo escolhido aparece.
+function categoryPicker(item, defaultExpense) {
+  const current = item?.categoryId;
+  const group = (kind, name, fallback) => {
+    const cats = catsOf(kind);
+    const sel = cats.some(c => c.id === current) ? current : fallback || cats[0]?.id;
+    return `<fieldset class="field" data-only="${kind}"><legend>Categoria</legend><div class="chips wrap">
+      ${cats.map(c => radioChip(name, c.id, c.name, c.color, c.id === sel)).join('')}
+    </div></fieldset>`;
+  };
+  return group('expense', 'categoryId', defaultExpense) + group('income', 'incomeCategoryId');
+}
+function pickedCategory(fd) {
+  return fd.get('type') === 'income' ? fd.get('incomeCategoryId') : fd.get('categoryId');
+}
+function toggleType(form) {
+  const type = new FormData(form).get('type') || 'expense';
+  form.querySelectorAll('[data-only]').forEach(el => { el.hidden = el.dataset.only !== type; });
+  return type;
+}
+
 function swatches(selected) {
   return `<div class="chips wrap">${PALETA.map(c => `<label class="chip swatch" style="--c:${c}" aria-label="${c}"><input type="radio" name="color" value="${c}" ${c === selected ? 'checked' : ''}></label>`).join('')}</div>`;
 }
@@ -271,21 +320,36 @@ function viewResumo() {
     </div>`;
   }
 
-  const entries = entriesFor(ui.month);
+  const all = entriesFor(ui.month);
+  const incomes = all.filter(e => e.kind === 'income').sort((a, b) => b.date.localeCompare(a.date));
+  const entries = all.filter(e => e.kind !== 'income');
   const total = sum(entries);
+  const received = sum(incomes);
   const byKind = k => sum(entries.filter(e => e.kind === k));
   const groups = groupByCategory(entries);
-  const pinned = state.categories.filter(c => c.pinned);
+  const pinned = catsOf('expense').filter(c => c.pinned);
+  const left = received - total;
 
-  let html = `<section class="panel hero">
-    <span class="eyebrow">Total do mês</span>
-    <strong class="big">${money(total)}</strong>
-    <div class="split">
+  const kinds = `<div class="split">
       <div><span>Faturas</span><b>${money(byKind('card'))}</b></div>
       <div><span>Fixos</span><b>${money(byKind('fixed'))}</b></div>
       <div><span>Pix/débito</span><b>${money(byKind('other'))}</b></div>
-    </div>
-  </section>`;
+    </div>`;
+  let html = received
+    ? `<section class="panel hero">
+      <span class="eyebrow">Sobra do mês</span>
+      <strong class="big ${left < 0 ? 'neg' : ''}">${left < 0 ? '−' : ''}${money(Math.abs(left))}</strong>
+      <div class="split two">
+        <div><span>Receitas</span><b class="pos">${money(received)}</b></div>
+        <div><span>Gastos</span><b>${money(total)}</b></div>
+      </div>
+      ${kinds}
+    </section>`
+    : `<section class="panel hero">
+      <span class="eyebrow">Total de gastos do mês</span>
+      <strong class="big">${money(total)}</strong>
+      ${kinds}
+    </section>`;
 
   const last = state.meta?.lastBackup;
   const days = last ? Math.floor((Date.now() - new Date(last)) / 864e5) : null;
@@ -349,6 +413,13 @@ function viewResumo() {
     </section>`;
   }
 
+  if (incomes.length) {
+    html += `<section class="section">
+      <div class="section-head"><h2>Receitas</h2></div>
+      <div class="panel rows">${incomes.map(entryRow).join('')}</div>
+    </section>`;
+  }
+
   if (state.investments.length) {
     const stats = state.investments.map(i => invStats(i.id));
     const bal = stats.reduce((a, s) => a + s.balance, 0);
@@ -368,11 +439,17 @@ function viewFaturas() {
   if (!state.cards.length) return empty('Nenhum cartão ainda', 'Cadastre um cartão para acompanhar as faturas.', 'new-card', 'Adicionar cartão');
 
   const card = cardById(ui.cardId) || state.cards[0];
-  ui.cardId = card.id;
-  const items = entriesFor(ui.month).filter(e => e.kind === 'card' && e.cardId === card.id).sort((a, b) => b.date.localeCompare(a.date));
+  if (card.id !== ui.cardId) {
+    ui.cardId = card.id;
+    ui.invMonth = openInvoice(card);
+  }
+  const key = ui.invMonth;
+  const items = entriesFor(key).filter(e => e.kind === 'card' && e.cardId === card.id).sort((a, b) => b.date.localeCompare(a.date));
   const total = sum(items);
-  const { close, due } = invoiceDates(card, ui.month);
-  const st = invoiceStatus(card, ui.month);
+  const { close, due } = invoiceDates(card, key);
+  const st = invoiceStatus(card, key);
+  const open = openInvoice(card);
+  const jump = key === open ? '' : `<button class="link" data-action="go-open-invoice">Ir para a fatura aberta (${monthShort(open)})</button>`;
   const groups = groupByCategory(items);
   const c = color(card.color);
 
@@ -388,12 +465,13 @@ function viewFaturas() {
   return `<div class="chips scroll">${state.cards.map(x => `<button class="chip ${x.id === card.id ? 'on' : ''}" style="--c:${color(x.color)}" data-action="select-card" data-id="${esc(x.id)}">${esc(x.name)}</button>`).join('')}</div>
 
   <section class="panel invoice" style="--c:${c}">
-    <div class="invoice-top"><span class="eyebrow">Fatura de ${MESES[Number(ui.month.slice(5)) - 1].toLowerCase()}</span><span class="badge ${st.cls}">${st.label}</span></div>
+    <div class="invoice-top"><span class="eyebrow">Fatura de ${MESES[Number(key.slice(5)) - 1].toLowerCase()}</span><span class="badge ${st.cls}">${st.label}</span></div>
     <strong class="big">${money(total)}</strong>
     <div class="invoice-dates">Fecha ${fmtDay(close)} · Vence ${fmtDay(due)}</div>
     ${groups.length ? `<div style="margin-top:14px">${stackBar(groups, total)}<div class="legend">${groups.map(g => `<span><i class="dot" style="--c:${color(g.cat.color)}"></i>${esc(g.cat.name)} <b>${money(g.total)}</b></span>`).join('')}</div></div>` : ''}
     ${limit}
   </section>
+  ${jump ? `<div style="text-align:center;margin-top:12px">${jump}</div>` : ''}
 
   <section class="section">
     <div class="section-head"><h2>Lançamentos</h2><button class="link" data-action="new-expense">Lançar</button></div>
@@ -450,7 +528,7 @@ function viewAjustes() {
   </section>
 
   <section class="section">
-    <div class="section-head"><h2>Gastos fixos e financiamentos</h2><button class="link" data-action="new-fixed">Adicionar</button></div>
+    <div class="section-head"><h2>Fixos: contas e receitas mensais</h2><button class="link" data-action="new-fixed">Adicionar</button></div>
     <div class="panel rows">${state.fixed.map(f => {
       const cat = catById(f.categoryId);
       const n = monthDiff(f.startMonth, cm) + 1;
@@ -458,9 +536,9 @@ function viewAjustes() {
       return `<button class="row" data-action="edit-fixed" data-id="${esc(f.id)}">
         ${ic(cat.name, cat.color)}
         <span class="row-main"><b>${esc(f.name)}</b><small>${progress} · dia ${f.dueDay}</small></span>
-        <span class="row-val">${money(f.amount)}</span>
+        <span class="row-val">${isIncome(f) ? `<span class="pos">+ ${money(f.amount)}</span>` : money(f.amount)}</span>
       </button>`;
-    }).join('') || '<div class="row muted">Ex.: parcela do carro, aluguel, academia</div>'}</div>
+    }).join('') || '<div class="row muted">Ex.: parcela do carro, aluguel, salário</div>'}</div>
   </section>
 
   <section class="section">
@@ -468,7 +546,7 @@ function viewAjustes() {
     <div class="panel rows">${state.categories.map(c => `<button class="row" data-action="edit-category" data-id="${esc(c.id)}">
       <i class="dot" style="--c:${color(c.color)};width:12px;height:12px"></i>
       <span class="row-main"><b>${esc(c.name)}</b></span>
-      <span class="row-val">${c.pinned ? '<span class="badge open">Destaque</span>' : ''}</span>
+      <span class="row-val">${c.kind === 'income' ? '<span class="badge">Receita</span>' : c.pinned ? '<span class="badge open">Destaque</span>' : ''}</span>
     </button>`).join('')}</div>
   </section>
 
@@ -490,9 +568,9 @@ const TITLES = { resumo: 'Resumo', faturas: 'Faturas', invest: 'Investimentos', 
 function render() {
   $('#title').textContent = TITLES[ui.tab];
   $('#month').hidden = !['resumo', 'faturas'].includes(ui.tab);
-  $('#month-label').textContent = monthLabel(ui.month);
   document.querySelectorAll('.tab[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === ui.tab));
   $('#view').innerHTML = VIEWS[ui.tab]();
+  $('#month-label').textContent = monthLabel(ui.tab === 'faturas' ? ui.invMonth : ui.month);
 }
 
 /* ---------- folhas (modais) ---------- */
@@ -529,50 +607,74 @@ function deleteButton(action, id) {
 
 function expenseForm(id) {
   const e = state.expenses.find(x => x.id === id);
+  const type = e?.type || 'expense';
   const cardId = e ? (e.cardId || '') : (ui.tab === 'faturas' && ui.cardId) || state.cards[0]?.id || '';
-  const catId = e?.categoryId || state.categories[0]?.id;
   const n = e?.installments || 1;
-  openSheet(e ? 'Editar gasto' : 'Novo gasto', `<form class="form" data-form="expense" data-id="${esc(e?.id || '')}">
-    <label class="amount"><span>Valor total</span><input name="amount" inputmode="decimal" placeholder="R$ 0,00" autocomplete="off" value="${e ? centsToInput(e.amount) : ''}" required></label>
-    <label class="field"><span>Descrição</span><input name="desc" maxlength="60" placeholder="Ex.: Posto Shell" value="${esc(e?.desc || '')}"></label>
-    <fieldset class="field"><legend>Pagamento</legend><div class="chips wrap">
+  const title = e ? (type === 'income' ? 'Editar receita' : 'Editar gasto') : 'Novo lançamento';
+  // data-override guarda a fatura da 1ª parcela quando o usuário escolhe a parcela atual.
+  openSheet(title, `<form class="form" data-form="expense" data-id="${esc(e?.id || '')}" data-override="${esc(e?.firstInvoice || '')}">
+    ${typeToggle(type)}
+    <label class="amount"><span data-only="expense">Valor total</span><span data-only="income">Valor recebido</span><input name="amount" inputmode="decimal" placeholder="R$ 0,00" autocomplete="off" value="${e ? centsToInput(e.amount) : ''}" required></label>
+    <label class="field"><span>Descrição</span><input name="desc" maxlength="60" placeholder="Ex.: Posto Shell, Salário" value="${esc(e?.desc || '')}"></label>
+    <fieldset class="field" data-only="expense"><legend>Pagamento</legend><div class="chips wrap">
       ${state.cards.map(c => radioChip('cardId', c.id, c.name, c.color, c.id === cardId)).join('')}
       ${radioChip('cardId', '', 'Pix/Débito', '#94A3B8', cardId === '')}
     </div></fieldset>
-    <fieldset class="field"><legend>Categoria</legend><div class="chips wrap">
-      ${state.categories.map(c => radioChip('categoryId', c.id, c.name, c.color, c.id === catId)).join('')}
-    </div></fieldset>
+    ${categoryPicker(e)}
     <div class="grid2">
-      <label class="field"><span>Data da compra</span><input type="date" name="date" value="${e?.date || todayISO()}" required></label>
+      <label class="field"><span>Data</span><input type="date" name="date" value="${e?.date || todayISO()}" required></label>
       <label class="field" data-installments><span>Parcelas</span><select name="installments">
         ${Array.from({ length: 24 }, (_, i) => i + 1).map(k => `<option value="${k}" ${k === n ? 'selected' : ''}>${k === 1 ? 'À vista' : `${k}x`}</option>`).join('')}
       </select></label>
     </div>
+    <label class="field" data-current><span>Parcela na fatura aberta</span><select name="current"></select></label>
     <p class="hint" data-hint></p>
     <div class="actions">${e ? deleteButton('delete-expense', e.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
   const form = $('form[data-form="expense"]');
-  updateExpenseHint(form);
+  updateExpenseForm(form);
   if (!e) form.amount.focus();
 }
 
-function updateExpenseHint(form) {
+function updateExpenseForm(form, changed) {
   const fd = new FormData(form);
-  const card = cardById(fd.get('cardId'));
-  form.querySelector('[data-installments]').style.visibility = card ? 'visible' : 'hidden';
-  const hint = form.querySelector('[data-hint]');
+  const type = toggleType(form);
+  const card = type === 'expense' ? cardById(fd.get('cardId')) : null;
+  const n = card ? Number(fd.get('installments')) || 1 : 1;
   const date = fd.get('date');
+  form.querySelector('[data-installments]').style.visibility = card ? 'visible' : 'hidden';
+  if (changed === 'date' || changed === 'cardId') form.dataset.override = '';
+
+  const currentField = form.querySelector('[data-current]');
+  const current = form.querySelector('select[name="current"]');
+  currentField.hidden = !(card && n > 1 && date);
+
+  const hint = form.querySelector('[data-hint]');
   if (!date) { hint.innerHTML = ''; return; }
+  if (type === 'income') { hint.innerHTML = `Entra como receita em <b>${monthLabel(monthOf(date)).toLowerCase()}</b>.`; return; }
   if (!card) { hint.innerHTML = `Conta em <b>${monthLabel(monthOf(date)).toLowerCase()}</b>.`; return; }
-  const key = invoiceMonthFor(card, date);
-  const n = Number(fd.get('installments')) || 1;
-  const amount = parseMoney(fd.get('amount'));
-  let text = `Entra na fatura de <b>${monthShort(key)}</b> do ${esc(card.name)}.`;
+
+  const open = openInvoice(card);
+  if (changed === 'current') form.dataset.override = addMonths(open, -(Number(current.value) - 1));
+  const first = form.dataset.override || invoiceMonthFor(card, date);
+  const last = addMonths(first, n - 1);
+  const i = monthDiff(first, open);
+
   if (n > 1) {
-    text += ` Última parcela em <b>${monthShort(addMonths(key, n - 1))}</b>.`;
-    if (amount > 0) text += ` ${n}x de <b>${money(splitInstallments(amount, n)[n - 1])}</b>.`;
+    if (current.options.length !== n) {
+      current.innerHTML = Array.from({ length: n }, (_, k) => `<option value="${k + 1}">${k + 1} de ${n}</option>`).join('');
+    }
+    current.value = String(Math.min(n, Math.max(1, i + 1)));
   }
-  hint.innerHTML = text;
+
+  const amount = parseMoney(fd.get('amount'));
+  const each = amount > 0 && n > 1 ? ` ${n}x de <b>${money(splitInstallments(amount, n)[n - 1])}</b>.` : '';
+  let text;
+  if (n === 1) text = `Entra na fatura de <b>${monthShort(first)}</b> do ${esc(card.name)}.`;
+  else if (i < 0) text = `A 1ª parcela entra na fatura de <b>${monthShort(first)}</b>; a última, em <b>${monthShort(last)}</b>.`;
+  else if (i >= n) text = `Todas as parcelas já passaram; a última foi na fatura de <b>${monthShort(last)}</b>.`;
+  else text = `Parcela <b>${i + 1} de ${n}</b> na fatura aberta (${monthShort(open)}). A última fica para <b>${monthShort(last)}</b>.`;
+  hint.innerHTML = text + each;
 }
 
 function cardForm(id) {
@@ -594,32 +696,34 @@ function cardForm(id) {
 function fixedForm(id) {
   const f = state.fixed.find(x => x.id === id);
   const current = f ? Math.max(1, monthDiff(f.startMonth, thisMonth()) + 1) : 1;
-  const catId = f?.categoryId || 'carro';
-  openSheet(f ? 'Editar gasto fixo' : 'Novo gasto fixo', `<form class="form" data-form="fixed" data-id="${esc(f?.id || '')}">
+  openSheet(f ? 'Editar fixo' : 'Novo fixo', `<form class="form" data-form="fixed" data-id="${esc(f?.id || '')}">
+    ${typeToggle(f?.type, ['Conta', 'Receita'])}
     <label class="amount"><span>Valor mensal</span><input name="amount" inputmode="decimal" placeholder="R$ 0,00" autocomplete="off" value="${f ? centsToInput(f.amount) : ''}" required></label>
-    <label class="field"><span>Nome</span><input name="name" maxlength="40" placeholder="Ex.: Parcela do carro" value="${esc(f?.name || '')}" required></label>
-    <fieldset class="field"><legend>Categoria</legend><div class="chips wrap">
-      ${state.categories.map(c => radioChip('categoryId', c.id, c.name, c.color, c.id === catId)).join('')}
-    </div></fieldset>
+    <label class="field"><span>Nome</span><input name="name" maxlength="40" placeholder="Ex.: Parcela do carro, Salário" value="${esc(f?.name || '')}" required></label>
+    ${categoryPicker(f, 'carro')}
     <label class="field"><span>Dia do pagamento</span><input name="dueDay" type="number" inputmode="numeric" min="1" max="31" value="${f?.dueDay || 10}" required></label>
     <div class="grid2">
       <label class="field"><span>Total de parcelas</span><input name="total" type="number" inputmode="numeric" min="1" max="600" placeholder="Sem fim" value="${f?.total || ''}"></label>
       <label class="field"><span>Parcela de ${MESES_CURTOS[Number(thisMonth().slice(5)) - 1]}</span><input name="current" type="number" inputmode="numeric" min="1" max="600" value="${current}"></label>
     </div>
-    <p class="hint">Deixe o total em branco para gastos sem prazo, como aluguel ou assinatura.</p>
+    <p class="hint">Deixe o total em branco para o que não tem prazo, como aluguel, assinatura ou salário.</p>
     <div class="actions">${f ? deleteButton('delete-fixed', f.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
-  if (!f) $('form[data-form="fixed"]').amount.focus();
+  const form = $('form[data-form="fixed"]');
+  toggleType(form);
+  if (!f) form.amount.focus();
 }
 
 function categoryForm(id) {
   const c = state.categories.find(x => x.id === id);
   openSheet(c ? 'Editar categoria' : 'Nova categoria', `<form class="form" data-form="category" data-id="${esc(c?.id || '')}">
+    ${typeToggle(c?.kind, ['De gasto', 'De receita'])}
     <label class="field"><span>Nome</span><input name="name" maxlength="24" value="${esc(c?.name || '')}" required></label>
     <fieldset class="field"><legend>Cor</legend>${swatches(c?.color || PALETA[state.categories.length % PALETA.length])}</fieldset>
-    <label class="check"><input type="checkbox" name="pinned" ${c?.pinned ? 'checked' : ''}> Destacar no resumo</label>
+    <label class="check" data-only="expense"><input type="checkbox" name="pinned" ${c?.pinned ? 'checked' : ''}> Destacar no resumo</label>
     <div class="actions">${c && c.id !== 'outros' ? deleteButton('delete-category', c.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
+  toggleType($('form[data-form="category"]'));
 }
 
 function investForm(id) {
@@ -680,20 +784,39 @@ const FORMS = {
   expense(fd, form) {
     const amount = parseMoney(fd.get('amount'));
     if (!(amount > 0)) return toast('Informe um valor válido');
-    const cardId = fd.get('cardId') || null;
-    const categoryId = fd.get('categoryId');
-    upsert(state.expenses, form.dataset.id, {
+    const type = fd.get('type');
+    const card = type === 'expense' ? cardById(fd.get('cardId')) : null;
+    const installments = card ? Number(fd.get('installments')) || 1 : 1;
+    const categoryId = pickedCategory(fd);
+    const data = {
+      type,
       desc: fd.get('desc').trim() || catById(categoryId).name,
       amount,
       date: fd.get('date'),
-      cardId,
+      cardId: card?.id || null,
       categoryId,
-      installments: cardId ? Number(fd.get('installments')) || 1 : 1,
-    });
-    if (cardId && ui.tab === 'faturas') ui.cardId = cardId;
+      installments,
+      firstInvoice: card && installments > 1 && form.dataset.override ? form.dataset.override : null,
+    };
+    upsert(state.expenses, form.dataset.id, data);
     closeSheet();
-    commit();
-    toast(form.dataset.id ? 'Gasto atualizado' : 'Gasto lançado');
+    if (card) {
+      const first = firstInvoiceOf(data, card);
+      const open = openInvoice(card);
+      const i = monthDiff(first, open);
+      const inOpen = i >= 0 && i < installments;
+      if (ui.tab === 'faturas') {
+        ui.cardId = card.id;
+        ui.invMonth = inOpen ? open : first;
+      }
+      commit();
+      toast(inOpen && installments > 1
+        ? `Parcela ${i + 1}/${installments} na fatura de ${monthShort(open)}`
+        : `Lançado na fatura de ${monthShort(first)}`);
+    } else {
+      commit();
+      toast(type === 'income' ? 'Receita lançada' : form.dataset.id ? 'Gasto atualizado' : 'Gasto lançado');
+    }
   },
   card(fd, form) {
     const limit = parseMoney(fd.get('limit'));
@@ -714,22 +837,25 @@ const FORMS = {
     const total = parseInt(fd.get('total'), 10) || null;
     const current = Math.max(1, parseInt(fd.get('current'), 10) || 1);
     upsert(state.fixed, form.dataset.id, {
+      type: fd.get('type'),
       name: fd.get('name').trim(),
       amount,
-      categoryId: fd.get('categoryId'),
+      categoryId: pickedCategory(fd),
       dueDay: dayValue(fd.get('dueDay')),
       total,
       startMonth: addMonths(thisMonth(), -(current - 1)),
     });
     closeSheet();
     commit();
-    toast('Gasto fixo salvo');
+    toast('Fixo salvo');
   },
   category(fd, form) {
+    const kind = fd.get('type');
     upsert(state.categories, form.dataset.id, {
       name: fd.get('name').trim(),
       color: fd.get('color') || PALETA[0],
-      pinned: fd.get('pinned') === 'on',
+      pinned: kind === 'expense' && fd.get('pinned') === 'on',
+      kind,
     });
     closeSheet();
     commit();
@@ -794,14 +920,15 @@ async function exportJson() {
 
 function exportCsv() {
   const cell = v => (/[;"\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
-  const rows = [['Data da compra', 'Mês', 'Descrição', 'Categoria', 'Pagamento', 'Parcela', 'Valor']];
+  const rows = [['Tipo', 'Data', 'Mês', 'Descrição', 'Categoria', 'Pagamento', 'Parcela', 'Valor']];
   for (const e of [...state.expenses].sort((a, b) => a.date.localeCompare(b.date))) {
-    const card = e.cardId && cardById(e.cardId);
-    const n = e.installments || 1;
-    const first = card ? invoiceMonthFor(card, e.date) : monthOf(e.date);
+    const income = isIncome(e);
+    const card = !income && e.cardId && cardById(e.cardId);
+    const n = card ? e.installments || 1 : 1;
+    const first = card ? firstInvoiceOf(e, card) : monthOf(e.date);
     splitInstallments(e.amount, n).forEach((v, i) => rows.push([
-      fmtFull(e.date), monthShort(addMonths(first, i)), e.desc, catById(e.categoryId).name,
-      card ? card.name : 'Pix/Débito', n > 1 ? `${i + 1}/${n}` : '', (v / 100).toFixed(2).replace('.', ','),
+      income ? 'Receita' : 'Gasto', fmtFull(e.date), monthShort(addMonths(first, i)), e.desc, catById(e.categoryId).name,
+      income ? '' : card ? card.name : 'Pix/Débito', n > 1 ? `${i + 1}/${n}` : '', (v / 100).toFixed(2).replace('.', ','),
     ]));
   }
   const csv = '﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n');
@@ -814,7 +941,7 @@ async function importJson(file) {
     const data = parsed.data || parsed;
     if (!['cards', 'expenses', 'categories'].every(k => Array.isArray(data[k]))) throw new Error('formato');
     if (!confirm(`Importar backup com ${data.expenses.length} lançamentos? Os dados atuais deste aparelho serão substituídos.`)) return;
-    state = { ...defaultState(), ...data };
+    state = migrate(data);
     ui.cardId = null;
     closeSheet();
     commit();
@@ -827,12 +954,19 @@ async function importJson(file) {
 /* ---------- ações ---------- */
 
 const ACTIONS = {
-  tab: d => { ui.tab = d.tab; render(); window.scrollTo(0, 0); },
-  'prev-month': () => { ui.month = addMonths(ui.month, -1); render(); },
-  'next-month': () => { ui.month = addMonths(ui.month, 1); render(); },
+  tab: d => {
+    const card = cardById(ui.cardId) || state.cards[0];
+    if (d.tab === 'faturas' && card) { ui.cardId = card.id; ui.invMonth = openInvoice(card); }
+    ui.tab = d.tab;
+    render();
+    window.scrollTo(0, 0);
+  },
+  'prev-month': () => { shiftMonth(-1); render(); },
+  'next-month': () => { shiftMonth(1); render(); },
   'close-sheet': closeSheet,
-  'select-card': d => { ui.cardId = d.id; render(); },
-  'open-invoice': d => { ui.cardId = d.id; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
+  'select-card': d => { ui.cardId = d.id; ui.invMonth = openInvoice(cardById(d.id)); render(); },
+  'go-open-invoice': () => { ui.invMonth = openInvoice(cardById(ui.cardId)); render(); },
+  'open-invoice': d => { ui.cardId = d.id; ui.invMonth = ui.month; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
 
   'new-expense': () => expenseForm(),
   'edit-expense': d => expenseForm(d.id),
@@ -866,9 +1000,12 @@ const ACTIONS = {
   'new-category': () => categoryForm(),
   'edit-category': d => categoryForm(d.id),
   'delete-category': d => {
-    if (!confirm('Excluir a categoria? Os gastos dela vão para "Outros".')) return;
+    const kind = catById(d.id).kind || 'expense';
+    const fallback = kind === 'income' ? catsOf('income').find(c => c.id !== d.id) : catById('outros');
+    if (!fallback) return toast('Mantenha ao menos uma categoria de receita');
+    if (!confirm(`Excluir a categoria? Os lançamentos dela vão para "${fallback.name}".`)) return;
     state.categories = state.categories.filter(c => c.id !== d.id);
-    for (const item of [...state.expenses, ...state.fixed]) if (item.categoryId === d.id) item.categoryId = 'outros';
+    for (const item of [...state.expenses, ...state.fixed]) if (item.categoryId === d.id) item.categoryId = fallback.id;
     closeSheet();
     commit();
   },
@@ -922,9 +1059,20 @@ document.addEventListener('submit', e => {
   fn(new FormData(form), form);
 });
 
+function shiftMonth(n) {
+  if (ui.tab === 'faturas') ui.invMonth = addMonths(ui.invMonth, n);
+  else ui.month = addMonths(ui.month, n);
+}
+
 ['input', 'change'].forEach(type => document.addEventListener(type, e => {
-  const form = e.target.closest?.('form[data-form="expense"]');
-  if (form) updateExpenseHint(form);
+  const form = e.target.closest?.('form[data-form]');
+  if (!form) return;
+  if (form.dataset.form === 'expense') {
+    // "input" e "change" disparam juntos em selects; só reage uma vez por campo.
+    if (type === 'input' || e.target.tagName !== 'SELECT') updateExpenseForm(form, e.target.name);
+  } else {
+    toggleType(form);
+  }
 }));
 
 $('#import-file').addEventListener('change', e => {
