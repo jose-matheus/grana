@@ -1,5 +1,5 @@
 // Troque a versão a cada publicação para o iPhone baixar os arquivos novos.
-const CACHE = 'grana-v4';
+const CACHE = 'grana-v5';
 const ASSETS = [
   './',
   './index.html',

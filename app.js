@@ -1026,10 +1026,16 @@ let pendingImport = null;
 
 async function readInvoiceCsv(file) {
   if (!state.cards.length) return toast('Cadastre o cartão antes de importar');
+  let text;
   try {
-    pendingImport = parseNubankCsv(await file.text());
+    text = await file.text();
   } catch {
-    return toast('Não reconheci esse arquivo de fatura');
+    return toast('Não consegui abrir o arquivo. Mova-o para "No meu iPhone"');
+  }
+  try {
+    pendingImport = parseNubankCsv(text);
+  } catch {
+    return toast(`"${file.name}" não parece uma fatura do Nubank`);
   }
   if (!pendingImport.items.length) return toast('Nenhum lançamento encontrado no arquivo');
   const card = state.cards.find(c => /nubank|\bnu\b/i.test(c.name)) || state.cards[0];
@@ -1222,6 +1228,7 @@ document.addEventListener('change', e => {
   const file = input?.files[0];
   if (!file) return;
   input.value = '';
+  toast(`Lendo ${file.name}…`);
   if (input.dataset.file === 'csv') readInvoiceCsv(file);
   else importJson(file);
 });
