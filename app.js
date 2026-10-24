@@ -87,6 +87,7 @@ function defaultState() {
     fixed: [],
     investments: [],
     moves: [],
+    goal: { monthly: null },
     meta: { lastBackup: null },
   };
 }
@@ -310,6 +311,160 @@ function swatches(selected) {
   return `<div class="chips wrap">${PALETA.map(c => `<label class="chip swatch" style="--c:${c}" aria-label="${c}"><input type="radio" name="color" value="${c}" ${c === selected ? 'checked' : ''}></label>`).join('')}</div>`;
 }
 
+/* ---------- metas ---------- */
+
+// Mês em que fecha a fatura que vence em key (inverso de invoiceClosingIn).
+const closingMonthOf = (card, key) => (card.dueDay > card.closingDay ? key : addMonths(key, -1));
+
+// Parcelamentos de cartão ainda em aberto a partir de base (mês de fechamento,
+// como no Resumo) e quanto eles pesam em cada mês se nada novo for parcelado.
+function installmentPlan(base = thisMonth()) {
+  const items = [];
+  for (const e of state.expenses) {
+    const n = e.installments || 1;
+    const card = cardById(e.cardId);
+    if (isIncome(e) || !card || n < 2) continue;
+    const first = firstInvoiceOf(e, card);
+    const parts = splitInstallments(e.amount, n);
+    let remaining = 0;
+    let current = 0;
+    parts.forEach((v, i) => {
+      if (closingMonthOf(card, addMonths(first, i)) < base) return;
+      remaining += v;
+      current ||= i + 1;
+    });
+    if (remaining) items.push({ e, n, current, each: parts[n - 1], remaining, end: closingMonthOf(card, addMonths(first, n - 1)) });
+  }
+  items.sort((a, b) => a.end.localeCompare(b.end) || b.each - a.each);
+  const lastEnd = items.reduce((m, it) => (it.end > m ? it.end : m), base);
+  const months = Array.from({ length: monthDiff(base, lastEnd) + 2 }, (_, i) => addMonths(base, i));
+  const burden = months.map(k => sum(entriesFor(k).filter(e => e.kind === 'card' && e.label)));
+  return { items, months, burden, now: burden[0], free: months[months.length - 1], remaining: items.reduce((a, it) => a + it.remaining, 0) };
+}
+
+// "Sem novos parcelamentos, em X você paga Y a menos por mês."
+function planMessage(p, full) {
+  const goal = state.goal?.monthly;
+  const gain = i => p.now - p.burden[i];
+  let i = goal ? p.burden.findIndex((_, k) => k > 0 && gain(k) >= goal) : -1;
+  if (i < 0) i = p.burden.findIndex((_, k) => k > 0 && gain(k) > 0);
+  const parts = [];
+  if (i > 0) {
+    parts.push(`Sem novos parcelamentos, em <b>${monthShort(p.months[i])}</b> suas parcelas caem de ${money(p.now)} para ${money(p.burden[i])}: <b class="pos">+${money(gain(i))} por mês</b>.`);
+    if (goal && gain(i) >= goal) parts.push(`Isso já cobre sua meta de ${money(goal)}.`);
+  }
+  if (full || i !== p.months.length - 1) parts.push(`Em <b>${monthShort(p.free)}</b> todas terminam: +${money(p.now)} por mês.`);
+  if (full) {
+    const acc = p.burden.reduce((a, _, k) => a + (k > 0 ? gain(k) : 0), 0);
+    parts.push(`Até lá, são <b>${money(acc)}</b> que deixam de sair do seu bolso em relação a hoje.`);
+  }
+  return parts.join(' ');
+}
+
+function barsHtml(months, values, withValues) {
+  const max = Math.max(...values, 1);
+  return `<div class="bars ${withValues ? 'tall' : ''}">${months.map((k, i) => `<div title="${money(values[i])}">
+    ${withValues ? `<em>${values[i] ? Math.round(values[i] / 100) : ''}</em>` : ''}
+    <i class="${values[i] ? '' : 'zero'}" style="height:${(values[i] / max * 100).toFixed(1)}%"></i>
+    <span>${MESES_CURTOS[Number(k.slice(5)) - 1]}</span>
+  </div>`).join('')}</div>`;
+}
+
+function planSection() {
+  const p = installmentPlan();
+  if (!p.items.length) return '';
+  const months = p.months.slice(0, 6);
+  return `<section class="section">
+    <div class="section-head"><h2>Parcelamentos</h2><button class="link" data-action="open-plan">Ver plano</button></div>
+    <button class="panel plan" data-action="open-plan">
+      <span class="plan-head"><b>${p.items.length} parcelamentos ativos</b><span class="muted">${money(p.remaining)} a pagar</span></span>
+      ${barsHtml(months, p.burden.slice(0, 6))}
+      <span class="plan-text">${planMessage(p, false)}</span>
+    </button>
+  </section>`;
+}
+
+function planSheet() {
+  const p = installmentPlan();
+  openSheet('Plano sem parcelamentos', `
+    <div class="split">
+      <div><span>Ativos</span><b>${p.items.length}</b></div>
+      <div><span>A pagar</span><b>${money(p.remaining)}</b></div>
+      <div><span>Neste mês</span><b>${money(p.now)}</b></div>
+    </div>
+    <p class="hint" style="margin-top:12px">${planMessage(p, true)}</p>
+    <section class="section">
+      <div class="section-head"><h2>Parcelas por mês (R$)</h2></div>
+      <div class="panel">${barsHtml(p.months, p.burden, true)}</div>
+    </section>
+    <section class="section">
+      <div class="section-head"><h2>Quando cada um termina</h2></div>
+      <div class="panel rows">${p.items.map(it => {
+        const cat = catById(it.e.categoryId);
+        return `<button class="row" data-action="edit-expense" data-id="${esc(it.e.id)}">
+          ${ic(cat.name, cat.color)}
+          <span class="row-main"><b>${esc(it.e.desc)}</b><small>${it.current}/${it.n} · termina em ${monthShort(it.end)}</small></span>
+          <span class="row-val">${money(it.each)}<small>resta ${money(it.remaining)}</small></span>
+        </button>`;
+      }).join('')}</div>
+    </section>
+    <p class="note">Os meses seguem o fechamento da fatura, como no Resumo.</p>`);
+}
+
+function goalCard(left) {
+  const goal = state.goal?.monthly;
+  if (!goal) {
+    return `<button class="panel row" style="margin-top:12px" data-action="edit-goal">
+      <span class="row-main"><b>Defina uma meta de economia</b><small>Quanto você quer guardar por mês</small></span><span class="chev">›</span>
+    </button>`;
+  }
+  const saved = state.moves
+    .filter(m => monthOf(m.date) === ui.month)
+    .reduce((a, m) => a + (m.kind === 'aporte' ? m.amount : m.kind === 'resgate' ? -m.amount : 0), 0);
+  const done = saved >= goal;
+  const missing = goal - Math.max(0, saved);
+  let status = done ? '<span class="pos">Meta do mês batida!</span>' : `Faltam <b>${money(missing)}</b>.`;
+  if (!done && left !== null && left < missing) status += ` A sobra prevista (${money(Math.max(0, left))}) não cobre o que falta.`;
+  return `<section class="panel pad" style="margin-top:12px">
+    <div class="invoice-top"><span class="eyebrow">Meta de guardar no mês</span><button class="link" data-action="edit-goal">Editar</button></div>
+    <div class="goal-line"><strong>${money(Math.max(0, saved))}</strong><span class="muted">de ${money(goal)}</span></div>
+    <div class="meter ${done ? '' : 'goal'}"><i style="width:${Math.min(100, Math.max(0, saved) / goal * 100).toFixed(1)}%"></i></div>
+    <small class="muted goal-status">${status}</small>
+    ${done ? '' : '<button class="btn ghost block" data-action="goal-aporte">Registrar aporte</button>'}
+  </section>`;
+}
+
+function limitsSection(groups) {
+  const limited = catsOf('expense').filter(c => c.limit);
+  if (!limited.length) return '';
+  return `<section class="section">
+    <div class="section-head"><h2>Limites do mês</h2></div>
+    <div class="panel rows">${limited.map(c => {
+      const used = groups.find(g => g.cat.id === c.id)?.total || 0;
+      const pct = used / c.limit;
+      const cls = pct > 1 ? 'over' : pct >= 0.8 ? 'warn' : '';
+      return `<button class="row" data-action="edit-category" data-id="${esc(c.id)}">
+        ${ic(c.name, c.color)}
+        <span class="row-main"><b>${esc(c.name)}</b>
+          <span class="meter ${cls}"><i style="width:${Math.min(100, pct * 100).toFixed(1)}%"></i></span>
+          <small class="${pct > 1 ? 'neg' : ''}">${pct > 1 ? `Passou ${money(used - c.limit)}` : `Restam ${money(c.limit - used)}`}</small>
+        </span>
+        <span class="row-val">${money(used)}<small>de ${money(c.limit)}</small></span>
+      </button>`;
+    }).join('')}</div>
+  </section>`;
+}
+
+function goalForm() {
+  const goal = state.goal?.monthly;
+  openSheet('Meta de economia', `<form class="form" data-form="goal">
+    <label class="amount"><span>Quanto quer guardar por mês</span><input name="amount" inputmode="decimal" placeholder="R$ 450,00" autocomplete="off" value="${goal ? centsToInput(goal) : ''}" required></label>
+    <p class="hint">Registre cada aporte em Investimentos. O Resumo mostra quanto falta no mês e quando o fim das parcelas libera espaço para a meta.</p>
+    <div class="actions">${goal ? '<button type="button" class="btn ghost danger" data-action="remove-goal">Remover</button>' : ''}<button class="btn primary">Salvar</button></div>
+  </form>`);
+  if (!goal) $('form[data-form="goal"]').amount.focus();
+}
+
 /* ---------- telas ---------- */
 
 function viewResumo() {
@@ -372,6 +527,10 @@ function viewResumo() {
       </div>`;
     }).join('')}</div>`;
   }
+
+  html += goalCard(received ? left : null);
+  html += limitsSection(groups);
+  html += planSection();
 
   if (groups.length) {
     html += `<section class="section">
@@ -534,7 +693,17 @@ const fileInput = kind => `<input type="file" class="file-input" data-file="${ki
 function viewAjustes() {
   const last = state.meta?.lastBackup;
   const cm = thisMonth();
+  const goal = state.goal?.monthly;
   return `<section class="section" style="margin-top:8px">
+    <div class="section-head"><h2>Metas</h2></div>
+    <div class="panel rows">
+      <button class="row" data-action="edit-goal"><span class="row-main"><b>Guardar por mês</b><small>${goal ? money(goal) : 'Nenhuma meta definida'}</small></span><span class="chev">›</span></button>
+      <button class="row" data-action="open-plan"><span class="row-main"><b>Plano sem parcelamentos</b><small>Quanto sobra quando as parcelas acabarem</small></span><span class="chev">›</span></button>
+    </div>
+    <p class="note" style="margin-top:8px;text-align:left">Os limites por mês ficam em cada categoria, mais abaixo.</p>
+  </section>
+
+  <section class="section">
     <div class="section-head"><h2>Cartões de crédito</h2><button class="link" data-action="new-card">Adicionar</button></div>
     ${state.cards.length ? `<label class="panel row file-row" style="margin-bottom:10px">
       <span class="row-main"><b>Importar fatura do Nubank</b><small>Arquivo .csv; as parcelas entram no lugar certo</small></span><span class="chev">›</span>
@@ -565,7 +734,7 @@ function viewAjustes() {
     <div class="section-head"><h2>Categorias</h2><button class="link" data-action="new-category">Adicionar</button></div>
     <div class="panel rows">${state.categories.map(c => `<button class="row" data-action="edit-category" data-id="${esc(c.id)}">
       <i class="dot" style="--c:${color(c.color)};width:12px;height:12px"></i>
-      <span class="row-main"><b>${esc(c.name)}</b></span>
+      <span class="row-main"><b>${esc(c.name)}</b>${c.limit ? `<small>Limite de ${money(c.limit)} por mês</small>` : ''}</span>
       <span class="row-val">${c.kind === 'income' ? '<span class="badge">Receita</span>' : c.pinned ? '<span class="badge open">Destaque</span>' : ''}</span>
     </button>`).join('')}</div>
   </section>
@@ -740,6 +909,7 @@ function categoryForm(id) {
     ${typeToggle(c?.kind, ['De gasto', 'De receita'])}
     <label class="field"><span>Nome</span><input name="name" maxlength="24" value="${esc(c?.name || '')}" required></label>
     <fieldset class="field"><legend>Cor</legend>${swatches(c?.color || PALETA[state.categories.length % PALETA.length])}</fieldset>
+    <label class="field" data-only="expense"><span>Limite por mês (opcional)</span><input name="limit" inputmode="decimal" placeholder="Sem limite" value="${c?.limit ? centsToInput(c.limit) : ''}"></label>
     <label class="check" data-only="expense"><input type="checkbox" name="pinned" ${c?.pinned ? 'checked' : ''}> Destacar no resumo</label>
     <div class="actions">${c && c.id !== 'outros' ? deleteButton('delete-category', c.id) : ''}<button class="btn primary">Salvar</button></div>
   </form>`);
@@ -871,10 +1041,12 @@ const FORMS = {
   },
   category(fd, form) {
     const kind = fd.get('type');
+    const limit = parseMoney(fd.get('limit'));
     upsert(state.categories, form.dataset.id, {
       name: fd.get('name').trim(),
       color: fd.get('color') || PALETA[0],
       pinned: kind === 'expense' && fd.get('pinned') === 'on',
+      limit: kind === 'expense' && limit > 0 ? limit : null,
       kind,
     });
     closeSheet();
@@ -891,6 +1063,14 @@ const FORMS = {
     save();
     render();
     id ? investDetail(id) : closeSheet();
+  },
+  goal(fd) {
+    const amount = parseMoney(fd.get('amount'));
+    if (!(amount > 0)) return toast('Informe um valor válido');
+    state.goal = { monthly: amount };
+    closeSheet();
+    commit();
+    toast('Meta salva');
   },
   move(fd, form) {
     const amount = parseMoney(fd.get('amount'));
@@ -1128,6 +1308,17 @@ const ACTIONS = {
   'go-open-invoice': () => { ui.invMonth = openInvoice(cardById(ui.cardId)); render(); },
   'open-invoice': d => { ui.cardId = d.id; ui.invMonth = d.month; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
 
+  'edit-goal': () => goalForm(),
+  'remove-goal': () => { state.goal = { monthly: null }; closeSheet(); commit(); },
+  'goal-aporte': () => {
+    if (state.investments.length === 1) return moveForm(state.investments[0].id, 'aporte');
+    if (!state.investments.length) return investForm();
+    ui.tab = 'invest';
+    render();
+    window.scrollTo(0, 0);
+    toast('Escolha o investimento do aporte');
+  },
+  'open-plan': () => planSheet(),
   'new-expense': () => expenseForm(),
   'edit-expense': d => expenseForm(d.id),
   'delete-expense': d => {

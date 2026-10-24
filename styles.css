@@ -133,6 +133,20 @@ button.row:active { background: var(--surface-2); }
 .invoice-dates { color: var(--muted); font-size: 13px; }
 .meter { height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; margin-top: 6px; }
 .meter i { display: block; height: 100%; background: var(--c, var(--accent)); }
+.row-main .meter { display: block; margin: 6px 0 4px; }
+.meter.warn i { background: #F7B32B; }
+.meter.over i { background: var(--danger); }
+.meter.goal i { background: #4EA8FF; }
+.goal-line { display: flex; align-items: baseline; gap: 6px; margin: 6px 0 2px; }
+.goal-line strong { font-size: 26px; letter-spacing: -.02em; }
+.goal-status { display: block; margin-top: 8px; font-size: 13px; }
+.plan { display: block; width: 100%; text-align: left; padding: 14px 14px 12px; }
+.plan-head { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+.plan .bars { height: 90px; padding: 12px 0 8px; }
+.plan-text { display: block; font-size: 13px; color: var(--muted); line-height: 1.45; }
+.plan-text b { color: var(--text); }
+.bars.tall { height: 160px; gap: 6px; }
+.bars em { font-style: normal; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 13px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
 .legend b { color: var(--text); font-weight: 600; }
