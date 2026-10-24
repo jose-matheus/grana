@@ -159,9 +159,14 @@ function splitInstallments(total, n) {
   return parts;
 }
 
-// Tudo o que pesa no mês: parcelas de cartão pela fatura, Pix/débito pela
-// data, os gastos fixos (financiamentos, assinaturas) e as receitas.
-function entriesFor(key) {
+// Fatura (mês do vencimento) que fecha no mês informado.
+const invoiceClosingIn = (card, key) => (card.dueDay > card.closingDay ? key : addMonths(key, 1));
+
+// Tudo o que pesa no mês: parcelas de cartão, Pix/débito pela data, os gastos
+// fixos (financiamentos, assinaturas) e as receitas. No Resumo, a fatura conta
+// no mês em que fecha, que é quando as compras aconteceram; com byDue (aba
+// Faturas), key já é o mês do vencimento.
+function entriesFor(key, byDue = false) {
   const out = [];
   for (const e of state.expenses) {
     const base = { categoryId: e.categoryId, desc: e.desc, date: e.date, ref: e.id };
@@ -171,7 +176,7 @@ function entriesFor(key) {
       const card = cardById(e.cardId);
       if (!card) continue;
       const n = e.installments || 1;
-      const i = monthDiff(firstInvoiceOf(e, card), key);
+      const i = monthDiff(firstInvoiceOf(e, card), byDue ? key : invoiceClosingIn(card, key));
       if (i >= 0 && i < n) {
         out.push({ ...base, kind: 'card', cardId: card.id, amount: splitInstallments(e.amount, n)[i], label: n > 1 ? `${i + 1}/${n}` : '' });
       }
@@ -384,13 +389,15 @@ function viewResumo() {
 
   if (state.cards.length) {
     html += `<section class="section">
-      <div class="section-head"><h2>Faturas que vencem no mês</h2></div>
+      <div class="section-head"><h2>Faturas que fecham no mês</h2></div>
       <div class="panel rows">${state.cards.map(card => {
         const t = sum(entries.filter(e => e.kind === 'card' && e.cardId === card.id));
-        const st = invoiceStatus(card, ui.month);
-        return `<button class="row" data-action="open-invoice" data-id="${esc(card.id)}">
+        const inv = invoiceClosingIn(card, ui.month);
+        const st = invoiceStatus(card, inv);
+        const { close, due } = invoiceDates(card, inv);
+        return `<button class="row" data-action="open-invoice" data-id="${esc(card.id)}" data-month="${inv}">
           ${ic(card.name, card.color)}
-          <span class="row-main"><b>${esc(card.name)}</b><small>Vence ${fmtDay(invoiceDates(card, ui.month).due)}</small></span>
+          <span class="row-main"><b>${esc(card.name)}</b><small>Fecha ${fmtDay(close)} · vence ${fmtDay(due)}</small></span>
           <span class="row-val">${money(t)}<small><span class="badge ${st.cls}">${st.label}</span></small></span>
         </button>`;
       }).join('')}</div>
@@ -444,7 +451,7 @@ function viewFaturas() {
     ui.invMonth = openInvoice(card);
   }
   const key = ui.invMonth;
-  const items = entriesFor(key).filter(e => e.kind === 'card' && e.cardId === card.id).sort((a, b) => b.date.localeCompare(a.date));
+  const items = entriesFor(key, true).filter(e => e.kind === 'card' && e.cardId === card.id).sort((a, b) => b.date.localeCompare(a.date));
   const total = sum(items);
   const { close, due } = invoiceDates(card, key);
   const st = invoiceStatus(card, key);
@@ -1119,7 +1126,7 @@ const ACTIONS = {
   'close-sheet': closeSheet,
   'select-card': d => { ui.cardId = d.id; ui.invMonth = openInvoice(cardById(d.id)); render(); },
   'go-open-invoice': () => { ui.invMonth = openInvoice(cardById(ui.cardId)); render(); },
-  'open-invoice': d => { ui.cardId = d.id; ui.invMonth = ui.month; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
+  'open-invoice': d => { ui.cardId = d.id; ui.invMonth = d.month; ui.tab = 'faturas'; render(); window.scrollTo(0, 0); },
 
   'new-expense': () => expenseForm(),
   'edit-expense': d => expenseForm(d.id),
