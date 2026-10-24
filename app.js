@@ -517,8 +517,12 @@ function viewInvest() {
 
 // O seletor de arquivos abre pelo toque direto no <label>: o Safari do iPhone
 // ignora input.click() disparado por código no app instalado. Sem "accept",
-// para o iOS não deixar o .csv ou o .json acinzentado na lista.
-const fileInput = kind => `<input type="file" class="file-input" data-file="${kind}">`;
+// o iOS libera só fotos e vídeos; text/* cobre CSV salvo sem extensão.
+const FILE_TYPES = {
+  csv: '.csv,.txt,text/csv,text/comma-separated-values,application/csv,application/vnd.ms-excel,text/plain,text/*',
+  backup: '.json,.txt,application/json,text/plain,text/*',
+};
+const fileInput = kind => `<input type="file" class="file-input" data-file="${kind}" accept="${FILE_TYPES[kind]}">`;
 
 function viewAjustes() {
   const last = state.meta?.lastBackup;
